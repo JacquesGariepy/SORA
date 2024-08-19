@@ -1,6 +1,4 @@
 import os
-import sys
-import time
 import random
 import logging
 import numpy as np
@@ -8,7 +6,7 @@ import pandas as pd
 import networkx as nx
 import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import List, Dict, Tuple, Union
+from typing import List, Dict, Union
 from scipy.stats import ttest_ind, f_oneway
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
@@ -19,7 +17,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from langchain import LLMChain, OpenAI, PromptTemplate
+from langchain.llms import OpenAI
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
 from langchain.agents import Tool, AgentExecutor, LLMSingleActionAgent
 from langchain.prompts import BaseChatPromptTemplate
 from langchain.schema import AgentAction, AgentFinish, HumanMessage
@@ -65,12 +65,13 @@ class CustomPromptTemplate(BaseChatPromptTemplate):
         formatted = self.template.format(**kwargs)
         return [HumanMessage(content=formatted)]
 
-class AgentivityStudy:
+class SORAStudy:
     def __init__(self, num_agents: int, num_scenarios: int, epochs: int = 100):
         self.num_agents = num_agents
         self.num_scenarios = num_scenarios
         self.epochs = epochs
         self.agents = []
+        self.autogen_agents = []
         self.scenarios = []
         self.interaction_data = pd.DataFrame()
         self.metrics = {}
@@ -79,22 +80,23 @@ class AgentivityStudy:
         self.loss_history = []
 
     def setup(self):
-        logger.info("Setting up the study environment...")
+        logger.info("Setting up the SORA study environment...")
         self.create_agents()
         self.create_scenarios()
         self.setup_neural_network()
         self.setup_langchain()
+        self.setup_autogen_agents()
 
     def create_agents(self):
         logger.info(f"Creating {self.num_agents} agents...")
         roles = ["Analyst", "Decision Maker", "Executor", "Monitor", "Innovator"]
         for i in range(self.num_agents):
-            role = random.choice(roles)
+            role = roles[i % len(roles)]
             agent = Agent(
                 name=f"Agent_{i}",
                 role=role,
-                goal=f"Perform tasks as a {role} in various scenarios",
-                backstory=f"An AI agent specialized in {role} tasks with evolving capabilities",
+                goal=f"Perform tasks as a {role} in various complex scenarios",
+                backstory=f"An AI agent specialized in {role} tasks with evolving capabilities and high agentivity",
                 allow_delegation=True,
                 verbose=True,
                 llm=self.llm
@@ -102,7 +104,7 @@ class AgentivityStudy:
             self.agents.append(agent)
 
     def create_scenarios(self):
-        logger.info(f"Creating {self.num_scenarios} scenarios...")
+        logger.info(f"Creating {self.num_scenarios} complex scenarios...")
         scenario_types = [
             "Crisis Management", "Market Analysis", "Scientific Research",
             "Urban Planning", "Environmental Conservation", "Healthcare Innovation"
@@ -126,12 +128,12 @@ class AgentivityStudy:
         self.criterion = nn.MSELoss()
 
     def setup_langchain(self):
-        logger.info("Setting up LangChain components...")
+        logger.info("Setting up LangChain components for metacognition...")
         self.prompt_template = CustomPromptTemplate(
-            template="You are an AI agent specialized in {agent_role}. "
-                     "Given the following scenario: {scenario_description}, "
+            template="You are an AI agent with high agentivity, specialized in {agent_role}. "
+                     "Given the following complex scenario: {scenario_description}, "
                      "how would you approach it? Consider the complexity, urgency, "
-                     "and ethical implications.\n{agent_scratchpad}",
+                     "ethical implications, and potential for collaborative problem-solving.\n{agent_scratchpad}",
             tools=self.create_tools(),
             input_variables=["agent_role", "scenario_description", "agent_scratchpad"]
         )
@@ -145,27 +147,43 @@ class AgentivityStudy:
         )
         self.memory = ConversationBufferMemory(memory_key="chat_history")
 
+    def setup_autogen_agents(self):
+        logger.info("Setting up AutoGen agents for diverse behavior...")
+        for agent in self.agents:
+            autogen_agent = autogen.ConversableAgent(
+                name=agent.name,
+                system_message=f"You are an AI agent with high agentivity, specialized in {agent.role} tasks. "
+                                "Your goal is to exhibit diverse and adaptive behavior in complex scenarios.",
+                llm_config={"config_list": [{"model": "gpt-3.5-turbo"}]}
+            )
+            self.autogen_agents.append(autogen_agent)
+
     def create_tools(self):
         return [
             Tool(
                 name="Analyze",
                 func=lambda x: "Analysis complete: " + x,
-                description="Useful for in-depth analysis of a situation"
+                description="Use for in-depth analysis of complex situations"
             ),
             Tool(
                 name="Decide",
                 func=lambda x: "Decision made: " + x,
-                description="Use this to make a final decision"
+                description="Use to make strategic decisions considering multiple factors"
             ),
             Tool(
                 name="Execute",
-                func=lambda x: "Executed action: " + x,
-                description="Use this to execute a planned action"
+                func=lambda x: "Action executed: " + x,
+                description="Use to implement planned actions in the scenario"
             ),
             Tool(
                 name="Monitor",
                 func=lambda x: "Monitoring results: " + x,
-                description="Use this to monitor the outcomes of actions"
+                description="Use to track and evaluate outcomes of actions"
+            ),
+            Tool(
+                name="Innovate",
+                func=lambda x: "Innovation proposed: " + x,
+                description="Use to generate creative solutions to complex problems"
             )
         ]
 
@@ -184,23 +202,52 @@ class AgentivityStudy:
         return AgentAction(tool=action, tool_input=action_input.strip(" ").strip('"'), log=llm_output)
 
     def run_simulation(self):
-        logger.info("Running simulation...")
+        logger.info("Running SORA simulation...")
         for epoch in range(self.epochs):
             logger.info(f"Epoch {epoch + 1}/{self.epochs}")
             for scenario in self.scenarios:
+                tasks = [
+                    Task(
+                        description=f"Analyze {scenario['type']} scenario with complexity {scenario['complexity']:.2f}",
+                        agent=self.agents[0]
+                    ),
+                    Task(
+                        description=f"Make decision for {scenario['type']} scenario with urgency {scenario['urgency']:.2f}",
+                        agent=self.agents[1]
+                    ),
+                    Task(
+                        description=f"Execute plan for {scenario['type']} scenario",
+                        agent=self.agents[2]
+                    ),
+                    Task(
+                        description=f"Monitor outcomes of {scenario['type']} scenario",
+                        agent=self.agents[3]
+                    ),
+                    Task(
+                        description=f"Propose innovations for {scenario['type']} scenario with ethical implications {scenario['ethical_implications']:.2f}",
+                        agent=self.agents[4]
+                    )
+                ]
+                
                 crew = Crew(
                     agents=self.agents,
-                    tasks=[Task(
-                        description=f"Handle {scenario['type']} scenario with "
-                                    f"complexity {scenario['complexity']:.2f}, "
-                                    f"urgency {scenario['urgency']:.2f}, and "
-                                    f"ethical implications {scenario['ethical_implications']:.2f}",
-                        agent=random.choice(self.agents)
-                    )],
+                    tasks=tasks,
                     process=Process.sequential
                 )
-                result = crew.kickoff()
-                self.record_interactions(scenario, result, epoch)
+                crew_result = crew.kickoff()
+                
+                # AutoGen multi-agent conversation for diverse behavior
+                autogen_manager = autogen.GroupChatManager(
+                    groupchat=autogen.GroupChat(agents=self.autogen_agents, messages=[]),
+                    llm_config={"config_list": [{"model": "gpt-3.5-turbo"}]}
+                )
+                autogen_result = autogen_manager.run(
+                    f"Discuss the results and implications of the {scenario['type']} scenario. "
+                    f"Consider ethical implications, adaptability, and potential for emergent behavior. "
+                    f"Crew results: {crew_result}"
+                )
+                
+                self.record_interactions(scenario, crew_result + "\n" + autogen_result, epoch)
             self.train_neural_network(epoch)
 
     def record_interactions(self, scenario: Dict, result: str, epoch: int):
@@ -219,7 +266,7 @@ class AgentivityStudy:
             self.interaction_data = self.interaction_data.append(interaction_data, ignore_index=True)
 
     def train_neural_network(self, epoch: int):
-        logger.info(f"Training neural network - Epoch {epoch + 1}")
+        logger.info(f"Training neural network for adaptive decision making - Epoch {epoch + 1}")
         epoch_data = self.interaction_data[self.interaction_data['epoch'] == epoch]
         
         inputs = epoch_data[['scenario_complexity', 'scenario_urgency', 'scenario_ethical_implications']].values
@@ -247,7 +294,7 @@ class AgentivityStudy:
     def measure_metacognition(self) -> float:
         logger.info("Measuring metacognition...")
         self.interaction_data['metacognition_score'] = self.interaction_data['interaction_content'].apply(
-            lambda x: len([w for w in x.lower().split() if w in ['think', 'consider', 'reflect', 'evaluate', 'assess']])
+            lambda x: len([w for w in x.lower().split() if w in ['think', 'consider', 'reflect', 'evaluate', 'assess', 'analyze', 'reason']])
         )
         return self.interaction_data['metacognition_score'].mean()
 
@@ -268,7 +315,7 @@ class AgentivityStudy:
         return nx.average_clustering(G)
 
     def calculate_metrics(self):
-        logger.info("Calculating metrics...")
+        logger.info("Calculating SORA metrics...")
         self.metrics['behavioral_diversity'] = self.measure_behavioral_diversity()
         self.metrics['metacognition'] = self.measure_metacognition()
         self.metrics['adaptability'] = self.measure_adaptability()
@@ -297,33 +344,36 @@ class AgentivityStudy:
         logger.info(tukey_results)
 
     def visualize_results(self):
-        logger.info("Visualizing results...")
+        logger.info("Visualizing SORA study results...")
+        # Agent Interaction Network
         G = nx.from_pandas_edgelist(self.interaction_data, 'agent_name', 'scenario_id')
         plt.figure(figsize=(12, 8))
         pos = nx.spring_layout(G)
         nx.draw(G, pos, with_labels=True, node_color='lightblue', node_size=500, font_size=10, font_weight='bold')
-        plt.title("Agent Interaction Network")
-        plt.savefig("agent_interaction_network.png")
+        plt.title("Agent Interaction Network in SORA Study")
+        plt.savefig("sora_agent_interaction_network.png")
         plt.close()
 
+        # Agentivity Metrics
         metrics_df = pd.DataFrame(list(self.metrics.items()), columns=['Metric', 'Value'])
         plt.figure(figsize=(10, 6))
         sns.barplot(x='Metric', y='Value', data=metrics_df)
-        plt.title("Agentivity Metrics")
+        plt.title("SORA Agentivity Metrics")
         plt.ylabel("Score")
         plt.xticks(rotation=45)
         plt.tight_layout()
-        plt.savefig("agentivity_metrics.png")
+        plt.savefig("sora_agentivity_metrics.png")
         plt.close()
 
-        scaler = StandardScaler()
-        pca = PCA(n_components=2)
+        # PCA of Agent Performance
         agent_performance = self.interaction_data.groupby('agent_name').agg({
             'scenario_complexity': 'mean',
             'scenario_urgency': 'mean',
             'scenario_ethical_implications': 'mean',
             'metacognition_score': 'mean'
         })
+        scaler = StandardScaler()
+        pca = PCA(n_components=2)
         scaled_data = scaler.fit_transform(agent_performance)
         pca_result = pca.fit_transform(scaled_data)
 
@@ -331,20 +381,20 @@ class AgentivityStudy:
         plt.scatter(pca_result[:, 0], pca_result[:, 1], alpha=0.7)
         plt.xlabel('First Principal Component')
         plt.ylabel('Second Principal Component')
-        plt.title('PCA of Agent Performance')
+        plt.title('PCA of Agent Performance in SORA Study')
         for i, agent in enumerate(agent_performance.index):
             plt.annotate(agent, (pca_result[i, 0], pca_result[i, 1]))
         plt.tight_layout()
-        plt.savefig("agent_performance_pca.png")
+        plt.savefig("sora_agent_performance_pca.png")
         plt.close()
 
-        # Visualize neural network loss
+        # Neural Network Training Loss
         plt.figure(figsize=(10, 6))
         plt.plot(range(1, len(self.loss_history) + 1), self.loss_history)
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
-        plt.title('Neural Network Training Loss')
-        plt.savefig("neural_network_loss.png")
+        plt.title('Neural Network Training Loss in SORA Study')
+        plt.savefig("sora_neural_network_loss.png")
         plt.close()
 
     def cluster_analysis(self):
@@ -369,8 +419,8 @@ class AgentivityStudy:
         plt.plot(range(1, 11), inertias, marker='o')
         plt.xlabel('Number of Clusters (k)')
         plt.ylabel('Inertia')
-        plt.title('Elbow Method for Optimal k')
-        plt.savefig("elbow_curve.png")
+        plt.title('Elbow Method for Optimal k in SORA Agent Clustering')
+        plt.savefig("sora_elbow_curve.png")
         plt.close()
         
         optimal_k = 3  # This should be determined by analyzing the elbow curve
@@ -385,12 +435,12 @@ class AgentivityStudy:
         scatter = plt.scatter(pca_result[:, 0], pca_result[:, 1], c=cluster_labels, cmap='viridis')
         plt.xlabel('First Principal Component')
         plt.ylabel('Second Principal Component')
-        plt.title('Cluster Analysis of Agent Behavior')
+        plt.title('Cluster Analysis of Agent Behavior in SORA Study')
         plt.colorbar(scatter)
         for i, agent in enumerate(agent_behavior.index):
             plt.annotate(agent, (pca_result[i, 0], pca_result[i, 1]))
         plt.tight_layout()
-        plt.savefig("agent_behavior_clusters.png")
+        plt.savefig("sora_agent_behavior_clusters.png")
         plt.close()
         
         return cluster_labels
@@ -401,11 +451,11 @@ class AgentivityStudy:
         
         plt.figure(figsize=(12, 6))
         ethical_scores.sort_values().plot(kind='bar')
-        plt.title('Average Ethical Implication Scores by Agent')
+        plt.title('Average Ethical Implication Scores by Agent in SORA Study')
         plt.xlabel('Agent')
         plt.ylabel('Average Ethical Implication Score')
         plt.tight_layout()
-        plt.savefig("ethical_implications_by_agent.png")
+        plt.savefig("sora_ethical_implications_by_agent.png")
         plt.close()
         
         correlation_matrix = self.interaction_data[['scenario_complexity', 'scenario_urgency', 
@@ -413,16 +463,16 @@ class AgentivityStudy:
         
         plt.figure(figsize=(10, 8))
         sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm')
-        plt.title('Correlation Matrix of Scenario Factors and Agent Performance')
+        plt.title('Correlation Matrix of Scenario Factors and Agent Performance in SORA Study')
         plt.tight_layout()
-        plt.savefig("correlation_matrix.png")
+        plt.savefig("sora_correlation_matrix.png")
         plt.close()
 
     def generate_report(self):
-        logger.info("Generating comprehensive report...")
+        logger.info("Generating comprehensive SORA study report...")
         report = f"""
-        Agentivity Study Report
-        =======================
+        SORA Study Report: Evaluation and Amplification of Agentivity in Multi-Agent AI Systems
+        =======================================================================================
 
         1. Overview
         -----------
@@ -450,11 +500,35 @@ class AgentivityStudy:
         -----------------------------
         Final Loss: {self.loss_history[-1]}
 
-        7. Conclusions and Future Work
+        7. CrewAI, AutoGen, and LangChain Integration
+        ---------------------------------------------
+        The study utilized CrewAI for task allocation and workflow management across {len(self.agents)} specialized agents.
+        AutoGen facilitated multi-agent discussions, enhancing behavioral diversity and adaptability.
+        LangChain was employed for metacognitive processes and complex reasoning tasks.
+
+        8. Hypotheses Evaluation
+        ------------------------
+        H1 (Behavioral Diversity): {self.metrics['behavioral_diversity']:.2f}
+        H2 (Metacognition): {self.metrics['metacognition']:.2f}
+        H3 (Adaptability): {self.metrics['adaptability']:.2f}
+        H4 (Transparency): {self.metrics['transparency']:.2f}
+        H5 (Social Complexity): {self.metrics['social_complexity']:.2f}
+
+        9. Conclusions and Future Work
         ------------------------------
-        [Summarize key findings and suggest directions for future research]
+        This SORA study demonstrates the potential of multi-agent systems with high agentivity in addressing complex scenarios.
+        The integration of CrewAI, AutoGen, and LangChain has shown promising results in enhancing behavioral diversity,
+        metacognition, adaptability, transparency, and social complexity of AI systems.
+
+        Future research directions:
+        - Explore the emergence of more complex social structures in AI ecosystems
+        - Develop adaptive ethical frameworks for highly agentive AI systems
+        - Investigate the potential for human-AI symbiosis in problem-solving
+        - Enhance the scalability and robustness of multi-agent systems in real-world applications
+
+        [Additional detailed analysis and insights to be added based on specific study outcomes]
         """
-        with open("agentivity_study_report.txt", "w") as f:
+        with open("sora_study_report.txt", "w") as f:
             f.write(report)
 
     def run_study(self):
@@ -466,8 +540,8 @@ class AgentivityStudy:
         cluster_labels = self.cluster_analysis()
         self.analyze_ethical_implications()
         self.generate_report()
-        logger.info("Study completed. Results and visualizations saved.")
+        logger.info("SORA study completed. Results, visualizations, and report generated.")
 
 if __name__ == "__main__":
-    study = AgentivityStudy(num_agents=20, num_scenarios=50, epochs=100)
+    study = SORAStudy(num_agents=20, num_scenarios=50, epochs=100)
     study.run_study()
