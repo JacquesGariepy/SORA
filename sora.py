@@ -1,4 +1,8 @@
+import json
 import os
+import re
+import sys
+from datetime import datetime
 import random
 import logging
 import numpy as np
@@ -17,12 +21,10 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from langchain.llms import OpenAI
+from langchain_community.llms import OpenAI
+from langchain.agents import create_react_agent, AgentExecutor
 from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
-from langchain.agents import Tool, AgentExecutor, LLMSingleActionAgent
-from langchain.prompts import BaseChatPromptTemplate
-from langchain.schema import AgentAction, AgentFinish, HumanMessage
+from langchain_core.tools import Tool
 from langchain.memory import ConversationBufferMemory
 
 import autogen
@@ -48,23 +50,19 @@ class NeuralNetwork(nn.Module):
         x = torch.relu(self.layer2(x))
         x = self.layer3(x)
         return x
-
-class CustomPromptTemplate(BaseChatPromptTemplate):
-    template: str
-    tools: List[Tool]
     
-    def format_messages(self, **kwargs) -> str:
-        intermediate_steps = kwargs.pop("intermediate_steps")
-        thoughts = ""
-        for action, observation in intermediate_steps:
-            thoughts += action.log
-            thoughts += f"\nObservation: {observation}\nThought: "
-        kwargs["agent_scratchpad"] = thoughts
-        kwargs["tools"] = "\n".join([f"{tool.name}: {tool.description}" for tool in self.tools])
-        kwargs["tool_names"] = ", ".join([tool.name for tool in self.tools])
-        formatted = self.template.format(**kwargs)
-        return [HumanMessage(content=formatted)]
+class CustomMemory(ConversationBufferMemory):
+    def __init__(self, memory_key: str = "history", input_key: str = "input", output_key: str = "output", return_messages: bool = False):
+        super().__init__(memory_key=memory_key, input_key=input_key, output_key=output_key, return_messages=return_messages)
 
+    def save_context(self, inputs: dict, outputs: dict) -> None:
+        input_str = inputs[self.input_key] if self.input_key in inputs else json.dumps(inputs)
+        output_str = outputs[self.output_key] if self.output_key in outputs else json.dumps(outputs)
+        return super().save_context({self.input_key: input_str}, {self.output_key: output_str})
+
+    def load_memory_variables(self, inputs: dict) -> dict:
+        return {self.memory_key: self.buffer}
+    
 class SORAStudy:
     def __init__(self, num_agents: int, num_scenarios: int, epochs: int = 100):
         self.num_agents = num_agents
@@ -78,6 +76,29 @@ class SORAStudy:
         self.neural_net = None
         self.llm = OpenAI(temperature=0.7)
         self.loss_history = []
+        self.log_files = {}
+        self.current_scenario_type = None
+        self.log_directory = "sora_logs"
+        os.makedirs(self.log_directory, exist_ok=True)
+
+    def get_log_filename(self, scenario_type):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return os.path.join(self.log_directory, f"sora_study_{scenario_type}_{timestamp}.txt")
+
+    def log_and_display(self, message: str):
+        print(message)
+        sys.stdout.flush()  # Forcer l'affichage immédiat
+        
+        if self.current_scenario_type:
+            if self.current_scenario_type not in self.log_files:
+                filename = self.get_log_filename(self.current_scenario_type)
+                self.log_files[self.current_scenario_type] = open(filename, "w", encoding="utf-8")
+            
+            log_file = self.log_files[self.current_scenario_type]
+            log_file.write(message + "\n")
+            log_file.flush()  # Forcer l'écriture immédiate dans le fichier
+        
+        logger.info(message)
 
     def setup(self):
         logger.info("Setting up the SORA study environment...")
@@ -93,7 +114,6 @@ class SORAStudy:
         for i in range(self.num_agents):
             role = roles[i % len(roles)]
             agent = Agent(
-                name=f"Agent_{i}",
                 role=role,
                 goal=f"Perform tasks as a {role} in various complex scenarios",
                 backstory=f"An AI agent specialized in {role} tasks with evolving capabilities and high agentivity",
@@ -120,43 +140,62 @@ class SORAStudy:
 
     def setup_neural_network(self):
         logger.info("Setting up neural network for agent decision making...")
-        input_size = 5  # scenario features + agent role encoding
+        input_size = 3  # scenario features + agent role encoding
         hidden_size = 64
-        output_size = len(self.scenarios[0]) - 1  # exclude 'id'
+        output_size = len(set(scenario['type'] for scenario in self.scenarios))   # exclude 'id'
         self.neural_net = NeuralNetwork(input_size, hidden_size, output_size)
         self.optimizer = optim.Adam(self.neural_net.parameters(), lr=0.001)
-        self.criterion = nn.MSELoss()
+        self.criterion = nn.CrossEntropyLoss() #nn.MSELoss()
 
     def setup_langchain(self):
         logger.info("Setting up LangChain components for metacognition...")
-        self.prompt_template = CustomPromptTemplate(
-            template="You are an AI agent with high agentivity, specialized in {agent_role}. "
-                     "Given the following complex scenario: {scenario_description}, "
-                     "how would you approach it? Consider the complexity, urgency, "
-                     "ethical implications, and potential for collaborative problem-solving.\n{agent_scratchpad}",
-            tools=self.create_tools(),
-            input_variables=["agent_role", "scenario_description", "agent_scratchpad"]
-        )
         
-        self.llm_chain = LLMChain(llm=self.llm, prompt=self.prompt_template)
-        self.agent = LLMSingleActionAgent(
-            llm_chain=self.llm_chain,
-            output_parser=self.output_parser,
-            stop=["\nObservation:"],
-            allowed_tools=[tool.name for tool in self.create_tools()]
-        )
-        self.memory = ConversationBufferMemory(memory_key="chat_history")
+        tools = self.create_tools()
+        
+        prompt_template = PromptTemplate(
+            input_variables=["input", "agent_role", "scenario_description", "tools", "tool_names", "history", "agent_scratchpad"],
+            template="""You are an AI agent with high agentivity, specialized in {agent_role}. 
+            Given the following complex scenario: {scenario_description}, 
+            how would you approach it? Consider the complexity, urgency, 
+            ethical implications, and potential for collaborative problem-solving.
 
-    def setup_autogen_agents(self):
-        logger.info("Setting up AutoGen agents for diverse behavior...")
-        for agent in self.agents:
-            autogen_agent = autogen.ConversableAgent(
-                name=agent.name,
-                system_message=f"You are an AI agent with high agentivity, specialized in {agent.role} tasks. "
-                                "Your goal is to exhibit diverse and adaptive behavior in complex scenarios.",
-                llm_config={"config_list": [{"model": "gpt-3.5-turbo"}]}
-            )
-            self.autogen_agents.append(autogen_agent)
+            You have access to the following tools:
+
+            {tools}
+
+            Use the following format:
+
+            Thought: you should always think about what to do
+            Action: the action to take, should be one of [{tool_names}]
+            Action Input: the input to the action
+            Observation: the result of the action
+            ... (this Thought/Action/Action Input/Observation can repeat N times)
+            Thought: I now know the final answer
+            Final Answer: the final answer to the original input question
+
+            Previous conversation history:
+            {history}
+
+            Human: {input}
+
+            AI: Let's approach this step-by-step:
+
+            {agent_scratchpad}"""
+        )
+
+        self.agent = create_react_agent(
+            llm=self.llm,
+            tools=tools,
+            prompt=prompt_template
+        )
+
+        self.agent_executor = AgentExecutor.from_agent_and_tools(
+            agent=self.agent,
+            tools=tools,
+            memory=CustomMemory(memory_key="history", input_key="input"),
+            verbose=True,
+            handle_parsing_errors=True
+        )
 
     def create_tools(self):
         return [
@@ -187,71 +226,75 @@ class SORAStudy:
             )
         ]
 
-    def output_parser(self, llm_output: str) -> Union[AgentAction, AgentFinish]:
-        if "Final Answer:" in llm_output:
-            return AgentFinish(
-                return_values={"output": llm_output.split("Final Answer:")[-1].strip()},
-                log=llm_output,
+    def setup_autogen_agents(self):
+        logger.info("Setting up AutoGen agents for diverse behavior...")
+        self.autogen_agents = []
+        for i, agent in enumerate(self.agents):
+            autogen_agent = autogen.AssistantAgent(
+                name=f"AutoGenAgent_{i}",
+                system_message=f"You are an AI agent with high agentivity, specialized in {agent.role} tasks. "
+                            f"Your goal is {agent.goal}. "
+                            f"Backstory: {agent.backstory} "
+                            "Exhibit diverse and adaptive behavior in complex scenarios.",
+                llm_config={"config_list": [{"model": "gpt-3.5-turbo"}]}
             )
-        regex = r"Action: (.*?)[\n]*Action Input:[\s]*(.*)"
-        match = re.search(regex, llm_output, re.DOTALL)
-        if not match:
-            raise ValueError(f"Could not parse LLM output: `{llm_output}`")
-        action = match.group(1).strip()
-        action_input = match.group(2)
-        return AgentAction(tool=action, tool_input=action_input.strip(" ").strip('"'), log=llm_output)
+            self.autogen_agents.append(autogen_agent)
 
     def run_simulation(self):
-        logger.info("Running SORA simulation...")
+        self.log_and_display("Starting SORA simulation...")
         for epoch in range(self.epochs):
-            logger.info(f"Epoch {epoch + 1}/{self.epochs}")
+            self.log_and_display(f"Epoch {epoch + 1}/{self.epochs}")
             for scenario in self.scenarios:
-                tasks = [
-                    Task(
-                        description=f"Analyze {scenario['type']} scenario with complexity {scenario['complexity']:.2f}",
-                        agent=self.agents[0]
-                    ),
-                    Task(
-                        description=f"Make decision for {scenario['type']} scenario with urgency {scenario['urgency']:.2f}",
-                        agent=self.agents[1]
-                    ),
-                    Task(
-                        description=f"Execute plan for {scenario['type']} scenario",
-                        agent=self.agents[2]
-                    ),
-                    Task(
-                        description=f"Monitor outcomes of {scenario['type']} scenario",
-                        agent=self.agents[3]
-                    ),
-                    Task(
-                        description=f"Propose innovations for {scenario['type']} scenario with ethical implications {scenario['ethical_implications']:.2f}",
-                        agent=self.agents[4]
-                    )
-                ]
+                self.current_scenario_type = scenario['type']
                 
-                crew = Crew(
-                    agents=self.agents,
-                    tasks=tasks,
-                    process=Process.sequential
+                tools = self.create_tools()  # Assurez-vous que cette méthode existe et retourne une liste d'outils
+                tool_names = ", ".join([tool.name for tool in tools])
+                
+                scenario_description = (
+                    f"{scenario['type']} scenario with complexity {scenario['complexity']:.2f}, "
+                    f"urgency {scenario['urgency']:.2f}, and ethical implications {scenario['ethical_implications']:.2f}"
                 )
-                crew_result = crew.kickoff()
+                
+                self.log_and_display(f"Processing scenario: {scenario_description}")
+                
+                result = self.agent_executor.invoke({
+                    "input": f"Analyze and respond to the following scenario as a SORA Agent: {scenario_description}",
+                    "agent_role": "SORA Agent",
+                    "scenario_description": scenario_description,
+                    "tools": "\n".join([f"{tool.name}: {tool.description}" for tool in tools]),
+                    "tool_names": tool_names
+                })
+                    
+                # Extract the agent's response from the result
+                agent_response = result.get('output', "No response generated")
                 
                 # AutoGen multi-agent conversation for diverse behavior
-                autogen_manager = autogen.GroupChatManager(
-                    groupchat=autogen.GroupChat(agents=self.autogen_agents, messages=[]),
-                    llm_config={"config_list": [{"model": "gpt-3.5-turbo"}]}
-                )
-                autogen_result = autogen_manager.run(
-                    f"Discuss the results and implications of the {scenario['type']} scenario. "
-                    f"Consider ethical implications, adaptability, and potential for emergent behavior. "
-                    f"Crew results: {crew_result}"
+                user_proxy = autogen.UserProxyAgent(
+                    name="User_Proxy",
+                    system_message="A proxy for the user in the conversation.",
+                    human_input_mode="NEVER"
                 )
                 
-                self.record_interactions(scenario, crew_result + "\n" + autogen_result, epoch)
+                # Initiate the group chat
+                group_chat = autogen.GroupChat(agents=self.autogen_agents, messages=[], max_round=5)
+                manager = autogen.GroupChatManager(groupchat=group_chat, llm_config={"config_list": [{"model": "gpt-3.5-turbo"}]})
+                
+                user_proxy.initiate_chat(
+                    manager,
+                    message=f"Discuss the results and implications of the {scenario['type']} scenario. "
+                            f"Consider ethical implications, adaptability, and potential for emergent behavior. "
+                            f"Agent executor results: {agent_response}"
+                )
+                
+                # Collect the conversation history
+                autogen_result = "\n".join([f"{msg['name']}: {msg['content']}" for msg in group_chat.messages])
+                
+                self.record_interactions(scenario, agent_response + "\n" + autogen_result, epoch)
+            
             self.train_neural_network(epoch)
 
     def record_interactions(self, scenario: Dict, result: str, epoch: int):
-        for agent in self.agents:
+        for i, agent in enumerate(self.agents):
             interaction_data = {
                 "epoch": epoch,
                 "scenario_id": scenario["id"],
@@ -259,11 +302,11 @@ class SORAStudy:
                 "scenario_complexity": scenario["complexity"],
                 "scenario_urgency": scenario["urgency"],
                 "scenario_ethical_implications": scenario["ethical_implications"],
-                "agent_name": agent.name,
+                "agent_id": f"Agent_{i}",
                 "agent_role": agent.role,
                 "interaction_content": result
             }
-            self.interaction_data = self.interaction_data.append(interaction_data, ignore_index=True)
+            self.interaction_data = self.interaction_data._append(interaction_data, ignore_index=True)
 
     def train_neural_network(self, epoch: int):
         logger.info(f"Training neural network for adaptive decision making - Epoch {epoch + 1}")
@@ -273,7 +316,7 @@ class SORAStudy:
         targets = pd.get_dummies(epoch_data['scenario_type']).values
 
         inputs = torch.FloatTensor(inputs)
-        targets = torch.FloatTensor(targets)
+        targets = torch.LongTensor(targets.argmax(axis=1))  # Convert one-hot to class indices
 
         self.optimizer.zero_grad()
         outputs = self.neural_net(inputs)
@@ -287,7 +330,7 @@ class SORAStudy:
 
     def measure_behavioral_diversity(self) -> float:
         logger.info("Measuring behavioral diversity...")
-        unique_interactions = self.interaction_data.groupby(['agent_name', 'scenario_type']).size().reset_index(name='count')
+        unique_interactions = self.interaction_data.groupby(['agent_id', 'scenario_type']).size().reset_index(name='count')
         total_possible = len(self.agents) * len(set(self.interaction_data['scenario_type']))
         return len(unique_interactions) / total_possible
 
@@ -300,7 +343,7 @@ class SORAStudy:
 
     def measure_adaptability(self) -> float:
         logger.info("Measuring adaptability...")
-        agent_performance = self.interaction_data.groupby('agent_name')['scenario_complexity'].agg(['mean', 'std'])
+        agent_performance = self.interaction_data.groupby('agent_id')['scenario_complexity'].agg(['mean', 'std'])
         return 1 - (agent_performance['std'] / agent_performance['mean']).mean()
 
     def measure_transparency(self) -> float:
@@ -311,7 +354,7 @@ class SORAStudy:
 
     def measure_social_complexity(self) -> float:
         logger.info("Measuring social complexity...")
-        G = nx.from_pandas_edgelist(self.interaction_data, 'agent_name', 'scenario_id')
+        G = nx.from_pandas_edgelist(self.interaction_data, 'agent_id', 'scenario_id')
         return nx.average_clustering(G)
 
     def calculate_metrics(self):
@@ -447,7 +490,7 @@ class SORAStudy:
 
     def analyze_ethical_implications(self):
         logger.info("Analyzing ethical implications of agent decisions...")
-        ethical_scores = self.interaction_data.groupby('agent_name')['scenario_ethical_implications'].mean()
+        ethical_scores = self.interaction_data.groupby('agent_id')['scenario_ethical_implications'].mean()
         
         plt.figure(figsize=(12, 6))
         ethical_scores.sort_values().plot(kind='bar')
@@ -532,16 +575,28 @@ class SORAStudy:
             f.write(report)
 
     def run_study(self):
-        self.setup()
-        self.run_simulation()
-        self.calculate_metrics()
-        self.perform_statistical_analysis()
-        self.visualize_results()
-        cluster_labels = self.cluster_analysis()
-        self.analyze_ethical_implications()
-        self.generate_report()
-        logger.info("SORA study completed. Results, visualizations, and report generated.")
+        try:
+            self.log_and_display("Starting SORA study...")
+            self.setup()
+            self.run_simulation()
+            self.calculate_metrics()
+            self.perform_statistical_analysis()
+            self.visualize_results()
+            cluster_labels = self.cluster_analysis()
+            if cluster_labels is not None:
+                self.analyze_ethical_implications(cluster_labels)
+            else:
+                self.log_and_display("Warning: Cluster analysis did not return labels.")
+            self.generate_report()
+            self.log_and_display("SORA study completed. Results, visualizations, and report generated.")
+        finally:
+            for log_file in self.log_files.values():
+                log_file.close()
 
+    def write_to_log(self, message):
+        with open("sora_study_log.txt", "a") as log_file:
+            log_file.write(f"{message}\n")
+        logger.info(message)
 if __name__ == "__main__":
-    study = SORAStudy(num_agents=20, num_scenarios=50, epochs=100)
+    study = SORAStudy(num_agents=2, num_scenarios=1, epochs=1)
     study.run_study()
