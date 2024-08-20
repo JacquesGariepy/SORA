@@ -16,7 +16,7 @@ import torch.nn.functional as F
 from sklearn.cluster import KMeans
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import silhouette_score, accuracy_score, precision_score, recall_score, f1_score
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.decomposition import PCA
 from statsmodels.stats.multicomp import pairwise_tukeyhsd
 
@@ -29,9 +29,14 @@ from langchain.agents import create_react_agent, AgentExecutor
 from langchain.prompts import PromptTemplate
 from langchain_core.tools import Tool
 from langchain.memory import ConversationBufferMemory
+from langchain.chains import LLMChain, SequentialChain
+from langchain.memory import ConversationBufferMemory
 
 import autogen
 from crewai import Agent, Task, Crew, Process
+
+import autogen
+from autogen import AssistantAgent, UserProxyAgent, GroupChat, GroupChatManager, ConversableAgent
 
 # Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -96,7 +101,7 @@ class SORAStudy:
         self.log_directory = f"sora_logs/{timestamp}/"
         os.makedirs(self.log_directory, exist_ok=True)
         self.log_file_path = os.path.join(self.log_directory, "sora_study_main_log.txt")
-        
+        self.DEFAULT_MODEL = "gpt-4o-mini"  # ou "gpt-4" si disponible
         # Ouvrir le fichier log en mode append
         self.log_file = open(self.log_file_path, "a", encoding="utf-8")
         
@@ -260,7 +265,7 @@ class SORAStudy:
         
         # Amélioration du prompt template existant
         enhanced_prompt_template = PromptTemplate(
-            input_variables=["input", "agent_role", "scenario_description", "tools", "tool_names", "history", "agent_scratchpad"],
+            input_variables=["input", "agent_role", "scenario_description", "tools", "tool_names", "chat_history", "agent_scratchpad"],
             template="""You are an AI agent with high agentivity, specialized in {agent_role}. 
             Given the following complex scenario: {scenario_description}, 
             how would you approach it? Consider the complexity, urgency, 
@@ -281,7 +286,7 @@ class SORAStudy:
             Final Answer: the final answer to the original input question
 
             Previous conversation history:
-            {history}
+            {chat_history}
 
             Human: {input}
 
@@ -292,7 +297,7 @@ class SORAStudy:
 
         # Configuration de la mémoire
         memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-
+        self.llm = OpenAI(temperature=0.7, model_name=self.DEFAULT_MODEL)
         # Chaîne pour l'analyse initiale
         analysis_chain = LLMChain(
             llm=self.llm,
@@ -334,6 +339,8 @@ class SORAStudy:
             verbose=True,
             handle_parsing_errors=True
         )
+
+        self.log_and_display("LangChain setup completed successfully.")
 
     def create_tools(self):
         return [
@@ -392,50 +399,145 @@ class SORAStudy:
             self.log_and_display(f"Error in agent executor: {str(e)}")
             return None
 
+    def analyze_data(self, data):
+        return f"Analysis result of {data}: [simulated analysis output]"
+
+    def generate_report(self, analysis: str) -> str:
+        self.log_and_display(f"Generating report based on: {analysis}")
+        return f"Report based on {analysis}: [simulated report content]"
+
     def setup_autogen_agents(self):
-        self.log_and_display("Setting up AutoGen agents for diverse behavior...")
+        self.log_and_display("Setting up enhanced AutoGen agents with tools and code generation...")
+        base_config = {
+            "config_list": [{"model": self.DEFAULT_MODEL}],
+            "temperature": 0.7
+        }
+        # Configuration des outils
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "analyze_data",
+                    "description": "Analyzes given data and returns insights",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "data": {
+                                "type": "string",
+                                "description": "The data to be analyzed"
+                            }
+                        },
+                        "required": ["data"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "generate_report",
+                    "description": "Generates a report based on analysis results",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "analysis": {
+                                "type": "string",
+                                "description": "The analysis results to be included in the report"
+                            }
+                        },
+                        "required": ["analysis"]
+                    }
+                }
+            }
+        ]
+
+        # Configuration de base pour les agents
         config_list = [{"model": "gpt-3.5-turbo"}]
-        llm_config = {"config_list": config_list, "temperature": 0.7}
+        llm_config = {
+            "config_list": config_list,
+            "temperature": 0.7
+        }
+
+        # Configuration pour les agents avec outils
+        llm_config_with_tools = {
+            **llm_config,
+            "tools": tools
+        }
+
+        # Création des agents spécialisés
+        self.analyst_agent = AssistantAgent(
+            name="Analyst",
+            system_message="You are a data analyst expert. Analyze data and provide insights.",
+            llm_config=llm_config_with_tools
+        )
+
+        self.coder_agent = AssistantAgent(
+            name="Coder",
+            system_message="You are a coding expert. Generate and modify code as needed.",
+            llm_config=base_config.copy()
+        )
         
-        for i, agent in enumerate(self.agents):
-            autogen_agent = autogen.AssistantAgent(
-                name=f"AutoGenAgent_{i}",
-                system_message=f"You are an AI agent with high agentivity, specialized in {agent.role} tasks. "
-                            f"Your goal is {agent.goal}. "
-                            f"Backstory: {agent.backstory} "
-                            "Exhibit diverse and adaptive behavior in complex scenarios.",
-                llm_config=llm_config
-            )
-            self.autogen_agents.append(autogen_agent)
+        code_execution_config = {
+            "work_dir": "generated_code",
+            "use_docker": False
+        }
+        self.coder_agent.code_execution_config = code_execution_config
         
-        # Ajout d'un agent humain proxy pour la simulation
-        self.human_proxy = autogen.UserProxyAgent(
+        self.reporter_agent = AssistantAgent(
+            name="Reporter",
+            system_message="You are a reporting expert. Create comprehensive reports based on analyses.",
+            llm_config=llm_config_with_tools
+        )
+
+        # Agent proxy humain
+        self.human_proxy = UserProxyAgent(
             name="HumanProxy",
             system_message="You are a proxy for human interaction in this simulation.",
             human_input_mode="NEVER"
         )
+
+        # Configuration du chat de groupe
+        self.group_chat = GroupChat(
+            agents=[self.analyst_agent, self.coder_agent, self.reporter_agent, self.human_proxy],
+            messages=[],
+            max_round=10
+        )
         
-        # Configuration du gestionnaire de groupe
-        self.group_chat = autogen.GroupChat(agents=self.autogen_agents + [self.human_proxy], messages=[], max_round=10)
-        self.manager = autogen.GroupChatManager(groupchat=self.group_chat, llm_config=llm_config)
+        # Configuration du GroupChatManager sans les outils
+        self.manager = GroupChatManager(groupchat=self.group_chat, llm_config=llm_config)
+
+        # Liaison des outils aux méthodes de la classe
+        for agent in [self.analyst_agent, self.reporter_agent]:
+            agent.register_function(
+                function_map={
+                    "analyze_data": self.analyze_data,
+                    "generate_report": self.generate_report
+                }
+            )
+
+        self.log_and_display("AutoGen agents setup completed with enhanced capabilities.")
 
     def setup_crewai(self):
         self.log_and_display("Setting up CrewAI for advanced task management...")
-        
+        for agent in self.agents:
+            agent.llm = OpenAI(temperature=0.7, model_name=self.DEFAULT_MODEL)
+
         # Création des tâches
         analyze_task = Task(
             description="Analyze the given scenario and provide insights.",
-            agent=self.agents[0]
+            agent=self.agents[0],
+            expected_output="A detailed analysis of the scenario with key insights."
         )
         
         decide_task = Task(
             description="Make a decision based on the analysis.",
-            agent=self.agents[1]
+            agent=self.agents[1],
+            expected_output="A clear decision with supporting rationale based on the analysis."
         )
         
         execute_task = Task(
             description="Execute the decided action.",
-            agent=self.agents[2]
+            agent=self.agents[2],
+            expected_output="A report on the execution of the decided action and its outcomes."
         )
         
         # Création de l'équipage
@@ -445,16 +547,51 @@ class SORAStudy:
             verbose=True
         )
 
+        self.log_and_display("CrewAI setup completed successfully.")
+
     def run_crewai_simulation(self, scenario):
         result = self.crew.kickoff()
         return result
-        def run_autogen_simulation(self, scenario):
-            chat_result = self.human_proxy.initiate_chat(
-                self.manager,
-                message=f"Let's collaborate to solve this scenario: {scenario['description']}",
-                clear_history=True
-            )
-            return chat_result
+    
+    def run_autogen_simulation(self, scenario):
+        self.log_and_display("Running AutoGen simulation with enhanced capabilities...")
+        scenario_description = (
+            f"{scenario['type']} scenario with complexity {scenario['complexity']:.2f}, "
+            f"urgency {scenario['urgency']:.2f}, and ethical implications {scenario['ethical_implications']:.2f}"
+        )
+        
+        initial_message = (
+            f"We need to solve the following scenario: {scenario_description}\n"
+            "1. Analyst: Analyze the scenario and provide insights.\n"
+            "2. Coder: Based on the analysis, generate any necessary code to address the scenario.\n"
+            "3. Reporter: Create a comprehensive report of our findings and actions."
+        )
+        
+        chat_result = self.human_proxy.initiate_chat(
+            self.manager,
+            message=initial_message,
+            clear_history=True
+        )
+        
+        self.log_and_display("AutoGen chat result:")
+        self.log_and_display(str(chat_result))
+
+        # Traitement du résultat
+        if isinstance(chat_result, dict):
+            analysis = chat_result.get('analysis', "No analysis provided")
+            code = chat_result.get('code', "No code generated")
+            report = chat_result.get('report', "No report generated")
+        else:
+            self.log_and_display("Unexpected chat_result format. Processing as string.")
+            analysis = str(chat_result)
+            code = "No code generated"
+            report = "No report generated"
+        
+        return {
+            "analysis": analysis,
+            "code": code,
+            "report": report
+        }
         
     def run_simulation(self):
         self.log_and_display("Starting SORA simulation...")
@@ -500,7 +637,9 @@ class SORAStudy:
                 combined_result = (
                     f"LangChain Reasoning: {reasoning_result}\n"
                     f"LangChain Agent: {agent_response}\n"
-                    f"AutoGen: {autogen_result}\n"
+                    f"AutoGen Analysis: {autogen_result['analysis']}\n"
+                    f"AutoGen Generated Code: {autogen_result['code']}\n"
+                    f"AutoGen Report: {autogen_result['report']}\n"
                     f"CrewAI: {crewai_result}"
                 )
 
@@ -554,7 +693,7 @@ class SORAStudy:
             communication_count = combined_result.count('\n') + 1
             metacognition_score = len([w for w in combined_result.lower().split() if w in ['think', 'consider', 'reflect', 'evaluate', 'assess', 'analyze', 'reason']])
         
-            interaction_data = {
+            interaction_data = pd.DataFrame([{
                 "epoch": epoch,
                 "scenario_id": scenario["id"],
                 "scenario_type": scenario["type"],
@@ -566,22 +705,40 @@ class SORAStudy:
                 "interaction_content": combined_result,
                 "communication_count": communication_count,
                 "metacognition_score": metacognition_score
-            }
-            self.interaction_data = self.interaction_data.append(interaction_data, ignore_index=True)
+            }])
+            
+            self.interaction_data = pd.concat([self.interaction_data, interaction_data], ignore_index=True)
 
         self.log_and_display(f"Recorded interaction data for scenario {scenario['id']} in epoch {epoch}")
 
     def train_neural_network(self):
         self.log_and_display("Training neural network for adaptive decision making...")
-        X = self.interaction_data[['scenario_complexity', 'scenario_urgency', 'scenario_ethical_implications', 'communication_count', 'metacognition_score']].values
-        y = pd.get_dummies(self.interaction_data['scenario_type']).values
+        
+        # Sélection des colonnes numériques pour l'entraînement
+        numeric_columns = ['scenario_complexity', 'scenario_urgency', 'scenario_ethical_implications', 'communication_count', 'metacognition_score']
+        
+        # Vérification que toutes les colonnes nécessaires sont présentes
+        if not all(col in self.interaction_data.columns for col in numeric_columns):
+            missing_columns = [col for col in numeric_columns if col not in self.interaction_data.columns]
+            self.log_and_display(f"Error: Missing columns in interaction_data: {missing_columns}")
+            return
+        
+        X = self.interaction_data[numeric_columns].values
+        
+        # Encodage de la colonne 'scenario_type' en valeurs numériques
+        label_encoder = LabelEncoder()
+        y = label_encoder.fit_transform(self.interaction_data['scenario_type'])
+        
+        # Vérification des types de données et conversion si nécessaire
+        X = X.astype(np.float32)
+        y = y.astype(np.int64)
         
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
         
         X_train = torch.FloatTensor(X_train)
-        y_train = torch.LongTensor(y_train.argmax(axis=1))
+        y_train = torch.LongTensor(y_train)
         X_test = torch.FloatTensor(X_test)
-        y_test = torch.LongTensor(y_test.argmax(axis=1))
+        y_test = torch.LongTensor(y_test)
         
         for epoch in range(self.epochs):
             self.optimizer.zero_grad()
