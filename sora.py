@@ -11,9 +11,11 @@ import networkx as nx
 import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import List, Dict, Union
-from scipy.stats import ttest_ind, f_oneway
+from scipy.stats import ttest_ind, f_oneway, chi2_contingency
+import torch.nn.functional as F
 from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import silhouette_score, accuracy_score, precision_score, recall_score, f1_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from statsmodels.stats.multicomp import pairwise_tukeyhsd
@@ -57,17 +59,21 @@ class Tee:
     #         if hasattr(f, 'close'):
     #             f.close()
 
-
 class NeuralNetwork(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size):
+    def __init__(self, input_size, hidden_size, output_size, dropout_rate=0.5):
         super(NeuralNetwork, self).__init__()
         self.layer1 = nn.Linear(input_size, hidden_size)
         self.layer2 = nn.Linear(hidden_size, hidden_size)
         self.layer3 = nn.Linear(hidden_size, output_size)
+        self.dropout = nn.Dropout(dropout_rate)
+        self.batch_norm1 = nn.BatchNorm1d(hidden_size)
+        self.batch_norm2 = nn.BatchNorm1d(hidden_size)
         
     def forward(self, x):
-        x = torch.relu(self.layer1(x))
-        x = torch.relu(self.layer2(x))
+        x = F.relu(self.batch_norm1(self.layer1(x)))
+        x = self.dropout(x)
+        x = F.relu(self.batch_norm2(self.layer2(x)))
+        x = self.dropout(x)
         x = self.layer3(x)
         return x
 
@@ -144,13 +150,71 @@ class SORAStudy:
         self.create_agents()
         self.create_scenarios()
         self.setup_neural_network()
-        self.setup_langchain()
+        self.setup_crewai()
         self.setup_autogen_agents()
+        self.setup_langchain()
+        self.initialize_interaction_data()
     
     def cleanup(self):
         # Rétablir stdout et stderr
         sys.stdout = sys.__stdout__
         sys.stderr = sys.__stderr__
+    
+    def setup_neural_network(self):
+        self.log_and_display("Setting up improved neural network for agent decision making...")
+        input_size = 5  # scenario_complexity, scenario_urgency, scenario_ethical_implications, agent_performance, agent_role_encoding
+        hidden_size = 128
+        output_size = len(set(scenario['type'] for scenario in self.scenarios))
+        self.neural_net = NeuralNetwork(input_size, hidden_size, output_size)
+        self.optimizer = optim.Adam(self.neural_net.parameters(), lr=0.001, weight_decay=1e-5)
+        self.criterion = nn.CrossEntropyLoss()
+
+    def train_neural_network(self):
+        X = self.interaction_data[['scenario_complexity', 'scenario_urgency', 'scenario_ethical_implications', 'agent_performance', 'agent_role_encoding']].values
+        y = pd.get_dummies(self.interaction_data['scenario_type']).values
+        
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        
+        X_train = torch.FloatTensor(X_train)
+        y_train = torch.LongTensor(y_train.argmax(axis=1))
+        X_test = torch.FloatTensor(X_test)
+        y_test = torch.LongTensor(y_test.argmax(axis=1))
+        
+        for epoch in range(self.epochs):
+            self.optimizer.zero_grad()
+            outputs = self.neural_net(X_train)
+            loss = self.criterion(outputs, y_train)
+            loss.backward()
+            self.optimizer.step()
+            
+            self.loss_history.append(loss.item())
+            
+            if epoch % 10 == 0:
+                self.log_and_display(f"Epoch {epoch} Loss: {loss.item()}")
+        
+        # Évaluation du modèle
+        self.neural_net.eval()
+        with torch.no_grad():
+            test_outputs = self.neural_net(X_test)
+            _, predicted = torch.max(test_outputs, 1)
+            accuracy = accuracy_score(y_test, predicted)
+            precision = precision_score(y_test, predicted, average='weighted')
+            recall = recall_score(y_test, predicted, average='weighted')
+            f1 = f1_score(y_test, predicted, average='weighted')
+        
+        self.log_and_display(f"Model Evaluation Results:")
+        self.log_and_display(f"Accuracy: {accuracy:.4f}")
+        self.log_and_display(f"Precision: {precision:.4f}")
+        self.log_and_display(f"Recall: {recall:.4f}")
+        self.log_and_display(f"F1-Score: {f1:.4f}")
+
+    def initialize_interaction_data(self):
+        self.interaction_data = pd.DataFrame(columns=[
+            "epoch", "scenario_id", "scenario_type", "scenario_complexity",
+            "scenario_urgency", "scenario_ethical_implications", "agent_id",
+            "agent_role", "interaction_content", "communication_count",
+            "metacognition_score"
+        ])
 
     def create_agents(self):
         self.log_and_display(f"Creating {self.num_agents} agents...")
@@ -188,19 +252,14 @@ class SORAStudy:
             })
         self.log_and_display(f"Scenario type distribution: {scenario_type_counts}")
 
-    def setup_neural_network(self):
-        self.log_and_display("Setting up neural network for agent decision making...")
-        input_size = 3  # scenario_complexity, scenario_urgency, scenario_ethical_implications
-        hidden_size = 64
-        output_size = len(set(scenario['type'] for scenario in self.scenarios))
-        self.neural_net = NeuralNetwork(input_size, hidden_size, output_size)
-        self.optimizer = optim.Adam(self.neural_net.parameters(), lr=0.001)
-        self.criterion = nn.CrossEntropyLoss()
-
     def setup_langchain(self):
-        self.log_and_display("Setting up LangChain components for metacognition...")
+        self.log_and_display("Setting up enhanced LangChain components for metacognition...")
+        
+        # Création des outils
         tools = self.create_tools()
-        prompt_template = PromptTemplate(
+        
+        # Amélioration du prompt template existant
+        enhanced_prompt_template = PromptTemplate(
             input_variables=["input", "agent_role", "scenario_description", "tools", "tool_names", "history", "agent_scratchpad"],
             template="""You are an AI agent with high agentivity, specialized in {agent_role}. 
             Given the following complex scenario: {scenario_description}, 
@@ -231,16 +290,47 @@ class SORAStudy:
             {agent_scratchpad}"""
         )
 
+        # Configuration de la mémoire
+        memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+
+        # Chaîne pour l'analyse initiale
+        analysis_chain = LLMChain(
+            llm=self.llm,
+            prompt=PromptTemplate(
+                input_variables=["scenario"],
+                template="Analyze the following scenario: {scenario}\n\nProvide a detailed analysis:"
+            ),
+            output_key="analysis"
+        )
+
+        # Chaîne pour la prise de décision
+        decision_chain = LLMChain(
+            llm=self.llm,
+            prompt=PromptTemplate(
+                input_variables=["analysis"],
+                template="Based on this analysis: {analysis}\n\nWhat decision would you make? Explain your reasoning:"
+            ),
+            output_key="decision"
+        )
+
+        # Chaîne séquentielle pour combiner analyse et décision
+        self.reasoning_chain = SequentialChain(
+            chains=[analysis_chain, decision_chain],
+            input_variables=["scenario"],
+            output_variables=["analysis", "decision"]
+        )
+
+        # Configuration de l'agent avec le prompt amélioré
         self.agent = create_react_agent(
             llm=self.llm,
             tools=tools,
-            prompt=prompt_template
+            prompt=enhanced_prompt_template
         )
 
         self.agent_executor = AgentExecutor.from_agent_and_tools(
             agent=self.agent,
             tools=tools,
-            memory=ConversationBufferMemory(memory_key="history", input_key="input"),
+            memory=memory,
             verbose=True,
             handle_parsing_errors=True
         )
@@ -274,19 +364,98 @@ class SORAStudy:
             )
         ]
 
+    def run_advanced_reasoning(self, scenario: Dict):
+        self.log_and_display("Running advanced reasoning process...")
+        try:
+            result = self.reasoning_chain({"scenario": str(scenario)})
+            self.log_and_display("Analysis result:")
+            self.log_and_display(result["analysis"])
+            self.log_and_display("Decision result:")
+            self.log_and_display(result["decision"])
+            return result
+        except Exception as e:
+            self.log_and_display(f"Error in advanced reasoning: {str(e)}")
+            return None
+
+    def run_agent_executor(self, scenario: Dict):
+        self.log_and_display("Running agent executor...")
+        try:
+            response = self.agent_executor.invoke({
+                "input": f"Analyze and respond to the following scenario: {str(scenario)}",
+                "agent_role": "SORA Agent",
+                "scenario_description": str(scenario)
+            })
+            self.log_and_display("Agent executor response:")
+            self.log_and_display(response)
+            return response
+        except Exception as e:
+            self.log_and_display(f"Error in agent executor: {str(e)}")
+            return None
+
     def setup_autogen_agents(self):
         self.log_and_display("Setting up AutoGen agents for diverse behavior...")
+        config_list = [{"model": "gpt-3.5-turbo"}]
+        llm_config = {"config_list": config_list, "temperature": 0.7}
+        
         for i, agent in enumerate(self.agents):
             autogen_agent = autogen.AssistantAgent(
                 name=f"AutoGenAgent_{i}",
                 system_message=f"You are an AI agent with high agentivity, specialized in {agent.role} tasks. "
-                               f"Your goal is {agent.goal}. "
-                               f"Backstory: {agent.backstory} "
-                               "Exhibit diverse and adaptive behavior in complex scenarios.",
-                llm_config={"config_list": [{"model": "gpt-3.5-turbo"}]}
+                            f"Your goal is {agent.goal}. "
+                            f"Backstory: {agent.backstory} "
+                            "Exhibit diverse and adaptive behavior in complex scenarios.",
+                llm_config=llm_config
             )
             self.autogen_agents.append(autogen_agent)
+        
+        # Ajout d'un agent humain proxy pour la simulation
+        self.human_proxy = autogen.UserProxyAgent(
+            name="HumanProxy",
+            system_message="You are a proxy for human interaction in this simulation.",
+            human_input_mode="NEVER"
+        )
+        
+        # Configuration du gestionnaire de groupe
+        self.group_chat = autogen.GroupChat(agents=self.autogen_agents + [self.human_proxy], messages=[], max_round=10)
+        self.manager = autogen.GroupChatManager(groupchat=self.group_chat, llm_config=llm_config)
 
+    def setup_crewai(self):
+        self.log_and_display("Setting up CrewAI for advanced task management...")
+        
+        # Création des tâches
+        analyze_task = Task(
+            description="Analyze the given scenario and provide insights.",
+            agent=self.agents[0]
+        )
+        
+        decide_task = Task(
+            description="Make a decision based on the analysis.",
+            agent=self.agents[1]
+        )
+        
+        execute_task = Task(
+            description="Execute the decided action.",
+            agent=self.agents[2]
+        )
+        
+        # Création de l'équipage
+        self.crew = Crew(
+            agents=self.agents,
+            tasks=[analyze_task, decide_task, execute_task],
+            verbose=True
+        )
+
+    def run_crewai_simulation(self, scenario):
+        result = self.crew.kickoff()
+        return result
+        def run_autogen_simulation(self, scenario):
+            chat_result = self.human_proxy.initiate_chat(
+                self.manager,
+                message=f"Let's collaborate to solve this scenario: {scenario['description']}",
+                clear_history=True
+            )
+            return chat_result
+        
     def run_simulation(self):
         self.log_and_display("Starting SORA simulation...")
         total_response_time = 0
@@ -297,63 +466,51 @@ class SORAStudy:
         for epoch in range(self.epochs):
             self.log_and_display(f"Epoch {epoch + 1}/{self.epochs}")
             for scenario in self.scenarios:
-                tools = self.create_tools()
-                tool_names = ", ".join([tool.name for tool in tools])
-                
                 scenario_description = (
                     f"{scenario['type']} scenario with complexity {scenario['complexity']:.2f}, "
                     f"urgency {scenario['urgency']:.2f}, and ethical implications {scenario['ethical_implications']:.2f}"
                 )
-                
                 self.log_and_display(f"Processing scenario: {scenario_description}")
                 
                 start_time = datetime.datetime.now()
 
-                result = self.agent_executor.invoke({
-                    "input": f"Analyze and respond to the following scenario as a SORA Agent: {scenario_description}",
-                    "agent_role": "SORA Agent",
-                    "scenario_description": scenario_description,
-                    "tools": "\n".join([f"{tool.name}: {tool.description}" for tool in tools]),
-                    "tool_names": tool_names
-                })
+                # Exécution du raisonnement avancé avec LangChain
+                reasoning_result = self.run_advanced_reasoning(scenario)
+                
+                # Exécution de l'agent avec LangChain
+                agent_response = self.run_agent_executor(scenario)
+                
+                # Exécution de la simulation AutoGen
+                autogen_result = self.run_autogen_simulation(scenario)
+                
+                # Exécution de la simulation CrewAI
+                crewai_result = self.run_crewai_simulation(scenario)
                 
                 end_time = datetime.datetime.now()
                 response_time = (end_time - start_time).total_seconds()
                 total_response_time += response_time
                 total_requests += 1
 
-                agent_response = result.get('output')
-                if not agent_response:
-                    self.log_and_display("No response generated by the agent.")
-                    continue
-
-                user_proxy = autogen.UserProxyAgent(
-                    name="User_Proxy",
-                    system_message="A proxy for the user in the conversation.",
-                    human_input_mode="NEVER"
-                )
-                
-                group_chat = autogen.GroupChat(agents=self.autogen_agents, messages=[], max_round=5)
-                manager = autogen.GroupChatManager(groupchat=group_chat, llm_config={"config_list": [{"model": "gpt-3.5-turbo"}]})
-                
-                user_proxy.initiate_chat(
-                    manager,
-                    message=f"Discuss the results and implications of the {scenario['type']} scenario. "
-                            f"Consider ethical implications, adaptability, and potential for emergent behavior. "
-                            f"Agent executor results: {agent_response}"
-                )
-                
-                autogen_result = "\n".join([f"{msg['name']}: {msg['content']}" for msg in group_chat.messages])
-                
-                self.record_interactions(scenario, agent_response + "\n" + autogen_result, epoch)
-                self.log_and_display(f"Agent response: {agent_response}")
-                if "Final Answer" in agent_response:
+                if agent_response and "Final Answer" in agent_response.get('output', ''):
                     successful_requests += 1
                     if scenario['complexity'] > 0.7:
                         complex_tasks_completed += 1
-            
-            self.train_neural_network(epoch)
 
+                # Combiner les résultats de toutes les simulations
+                combined_result = (
+                    f"LangChain Reasoning: {reasoning_result}\n"
+                    f"LangChain Agent: {agent_response}\n"
+                    f"AutoGen: {autogen_result}\n"
+                    f"CrewAI: {crewai_result}"
+                )
+
+                # Enregistrement des interactions et des résultats
+                self.record_interactions(scenario, combined_result, epoch)
+
+            # Entraînement du réseau neuronal à la fin de chaque époque
+            self.train_neural_network()
+
+        # Calcul et enregistrement des métriques finales
         self.agent_performance = self.interaction_data.groupby('agent_id').agg({
             'scenario_complexity': 'mean',
             'scenario_urgency': 'mean',
@@ -367,13 +524,35 @@ class SORAStudy:
             "successful_requests": successful_requests,
             "complex_tasks_completed": complex_tasks_completed
         }
+
         scenario_type_counts = self.interaction_data['scenario_type'].value_counts()
         self.log_and_display(f"Interaction data scenario type distribution: {scenario_type_counts}")
 
-    def record_interactions(self, scenario: Dict, result: str, epoch: int):
+        # Calcul des métriques finales
+        self.calculate_metrics()
+
+        # Analyse statistique
+        self.perform_statistical_analysis()
+
+        # Analyse des clusters
+        cluster_labels = self.cluster_analysis()
+        self.analyze_cluster_results(cluster_labels)
+
+        # Analyse des implications éthiques
+        self.analyze_ethical_implications()
+
+        # Visualisation des résultats
+        self.visualize_results()
+
+        # Génération du rapport final
+        self.generate_report()
+
+        self.log_and_display("SORA simulation completed. Results, visualizations, and report generated.")
+
+    def record_interactions(self, scenario: Dict, combined_result: str, epoch: int):
         for i, agent in enumerate(self.agents):
-            communication_count = result.count('\n') + 1  # Chaque ligne représente une communication
-            metacognition_score = len([w for w in result.lower().split() if w in ['think', 'consider', 'reflect', 'evaluate', 'assess', 'analyze', 'reason']])
+            communication_count = combined_result.count('\n') + 1
+            metacognition_score = len([w for w in combined_result.lower().split() if w in ['think', 'consider', 'reflect', 'evaluate', 'assess', 'analyze', 'reason']])
         
             interaction_data = {
                 "epoch": epoch,
@@ -384,39 +563,70 @@ class SORAStudy:
                 "scenario_ethical_implications": scenario["ethical_implications"],
                 "agent_id": f"Agent_{i}",
                 "agent_role": agent.role,
-                "interaction_content": result,
+                "interaction_content": combined_result,
                 "communication_count": communication_count,
                 "metacognition_score": metacognition_score
             }
-            self.interaction_data = self.interaction_data._append(interaction_data, ignore_index=True)
+            self.interaction_data = self.interaction_data.append(interaction_data, ignore_index=True)
 
-    def train_neural_network(self, epoch: int):
-        self.log_and_display(f"Training neural network for adaptive decision making - Epoch {epoch + 1}")
-        epoch_data = self.interaction_data[self.interaction_data['epoch'] == epoch]
-        
-        inputs = epoch_data[['scenario_complexity', 'scenario_urgency', 'scenario_ethical_implications']].values
-        targets = pd.get_dummies(epoch_data['scenario_type']).values
+        self.log_and_display(f"Recorded interaction data for scenario {scenario['id']} in epoch {epoch}")
 
-        inputs = torch.FloatTensor(inputs)
-        targets = torch.LongTensor(targets.argmax(axis=1))
-
-        self.optimizer.zero_grad()
-        outputs = self.neural_net(inputs)
-        loss = self.criterion(outputs, targets)
-        loss.backward()
-        self.optimizer.step()
+    def train_neural_network(self):
+        self.log_and_display("Training neural network for adaptive decision making...")
+        X = self.interaction_data[['scenario_complexity', 'scenario_urgency', 'scenario_ethical_implications', 'communication_count', 'metacognition_score']].values
+        y = pd.get_dummies(self.interaction_data['scenario_type']).values
         
-        self.loss_history.append(loss.item())
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
         
-        self.log_and_display(f"Epoch {epoch + 1} Loss: {loss.item()}")
+        X_train = torch.FloatTensor(X_train)
+        y_train = torch.LongTensor(y_train.argmax(axis=1))
+        X_test = torch.FloatTensor(X_test)
+        y_test = torch.LongTensor(y_test.argmax(axis=1))
+        
+        for epoch in range(self.epochs):
+            self.optimizer.zero_grad()
+            outputs = self.neural_net(X_train)
+            loss = self.criterion(outputs, y_train)
+            loss.backward()
+            self.optimizer.step()
+            
+            self.loss_history.append(loss.item())
+            
+            if epoch % 10 == 0:
+                self.log_and_display(f"Epoch {epoch} Loss: {loss.item()}")
+        
+        # Évaluation du modèle
+        self.neural_net.eval()
+        with torch.no_grad():
+            test_outputs = self.neural_net(X_test)
+            _, predicted = torch.max(test_outputs, 1)
+            accuracy = accuracy_score(y_test, predicted)
+            precision = precision_score(y_test, predicted, average='weighted')
+            recall = recall_score(y_test, predicted, average='weighted')
+            f1 = f1_score(y_test, predicted, average='weighted')
+        
+        self.log_and_display(f"Model Evaluation Results:")
+        self.log_and_display(f"Accuracy: {accuracy:.4f}")
+        self.log_and_display(f"Precision: {precision:.4f}")
+        self.log_and_display(f"Recall: {recall:.4f}")
+        self.log_and_display(f"F1-Score: {f1:.4f}")
 
     def calculate_metrics(self):
         self.log_and_display("Calculating SORA metrics...")
+        if self.interaction_data.empty:
+            self.log_and_display("No interaction data available for metric calculation.")
+            return
+
         self.metrics['behavioral_diversity'] = self.measure_behavioral_diversity()
         self.metrics['metacognition'] = self.measure_metacognition()
         self.metrics['adaptability'] = self.measure_adaptability()
         self.metrics['transparency'] = self.measure_transparency()
         self.metrics['social_complexity'] = self.measure_social_complexity()
+
+        self.log_and_display("Metrics calculated successfully.")
+        for metric, value in self.metrics.items():
+            self.log_and_display(f"{metric.capitalize()}: {value:.4f}")
+
 
     def measure_behavioral_diversity(self) -> float:
         self.log_and_display("Measuring behavioral diversity...")
@@ -430,7 +640,7 @@ class SORAStudy:
             lambda x: len([w for w in x.lower().split() if w in ['think', 'consider', 'reflect', 'evaluate', 'assess', 'analyze', 'reason']])
         )
         return self.interaction_data['metacognition_score'].mean()
-
+    
     def measure_adaptability(self) -> float:
         self.log_and_display("Measuring adaptability...")
         agent_performance = self.interaction_data.groupby('agent_id')['scenario_complexity'].agg(['mean', 'std'])
@@ -518,7 +728,78 @@ class SORAStudy:
             else:
                 self.log_and_display("Not enough groups with data for ANOVA and Tukey's test")
 
-
+    def perform_chi_square_analysis(self):
+        self.log_and_display("Performing Chi-Square analysis...")
+        
+        # Création d'un tableau de contingence entre le type de scénario et le rôle de l'agent
+        contingency_table = pd.crosstab(self.interaction_data['scenario_type'], self.interaction_data['agent_role'])
+        
+        # Réalisation du test du chi carré
+        chi2, p_value, dof, expected = chi2_contingency(contingency_table)
+        
+        self.log_and_display(f"Chi-Square Statistic: {chi2}")
+        self.log_and_display(f"p-value: {p_value}")
+        self.log_and_display(f"Degrees of Freedom: {dof}")
+        
+        # Interprétation des résultats
+        alpha = 0.05  # Niveau de signification
+        if p_value <= alpha:
+            self.log_and_display("There is a significant relationship between scenario type and agent role.")
+        else:
+            self.log_and_display("There is no significant relationship between scenario type and agent role.")
+        
+        # Calcul et affichage des résidus standardisés
+        observed = contingency_table.values
+        residuals = (observed - expected) / np.sqrt(expected)
+        
+        self.log_and_display("\nStandardized Residuals:")
+        residuals_df = pd.DataFrame(residuals, 
+                                    index=contingency_table.index, 
+                                    columns=contingency_table.columns)
+        self.log_and_display(residuals_df)
+        
+        # Identification des cellules contribuant le plus à la statistique du chi carré
+        self.log_and_display("\nCells contributing most to Chi-Square statistic:")
+        for i in range(residuals.shape[0]):
+            for j in range(residuals.shape[1]):
+                if abs(residuals[i, j]) > 2:  # Seuil arbitraire pour les résidus importants
+                    self.log_and_display(f"Scenario: {contingency_table.index[i]}, Agent Role: {contingency_table.columns[j]}, Residual: {residuals[i, j]:.2f}")
+        
+        return chi2, p_value, dof, expected, residuals_df
+    def perform_advanced_analysis(self):
+        self.log_and_display("Performing advanced statistical analysis...")
+        
+        # Test du chi-carré pour l'indépendance entre le type de scénario et le rôle de l'agent
+        contingency_table = pd.crosstab(self.interaction_data['scenario_type'], self.interaction_data['agent_role'])
+        chi2, p_value, dof, expected = chi2_contingency(contingency_table)
+        self.log_and_display(f"Chi-square test results: chi2={chi2:.4f}, p-value={p_value:.4f}")
+        
+        # Analyse de corrélation
+        correlation_matrix = self.interaction_data[['scenario_complexity', 'scenario_urgency', 'scenario_ethical_implications', 'metacognition_score']].corr()
+        
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm')
+        plt.title('Correlation Heatmap of Key Metrics')
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.log_directory, 'correlation_heatmap.png'))
+        plt.close()
+        
+        # Analyse de tendance temporelle
+        self.interaction_data['timestamp'] = pd.to_datetime(self.interaction_data['timestamp'])
+        time_series = self.interaction_data.set_index('timestamp').resample('D').mean()
+        
+        plt.figure(figsize=(12, 6))
+        plt.plot(time_series.index, time_series['metacognition_score'], label='Metacognition Score')
+        plt.plot(time_series.index, time_series['scenario_complexity'], label='Scenario Complexity')
+        plt.title('Temporal Trend of Metacognition Score and Scenario Complexity')
+        plt.xlabel('Date')
+        plt.ylabel('Score')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.log_directory, 'temporal_trend.png'))
+        plt.close()
+        
+        self.log_and_display("Advanced analysis completed. Results saved in the log directory.")
     def visualize_results(self):
         self.log_and_display("Visualizing SORA study results...")
         # Agent Interaction Network
@@ -579,7 +860,9 @@ class SORAStudy:
 
     def cluster_analysis(self):
         self.log_and_display("Performing cluster analysis on agent behavior...")
-        
+        if self.interaction_data.empty:
+            self.log_and_display("No interaction data available for cluster analysis.")
+            return None
         agent_behavior = self.interaction_data.groupby('agent_id').agg({
             'scenario_complexity': 'mean',
             'scenario_urgency': 'mean',
@@ -648,8 +931,6 @@ class SORAStudy:
         
         self.log_and_display("Cluster analysis completed. Results stored in self.cluster_info.")
         return cluster_labels
-
-
 
     def find_optimal_k_silhouette(self, data, max_k):
         silhouette_scores = []
@@ -799,7 +1080,6 @@ class SORAStudy:
             return "Moderate social complexity, some depth in agent interactions is observed."
         else:
             return "Low social complexity, suggesting limited or simplistic interactions between agents."
-
 
     def generate_report(self):
         self.log_and_display("Generating comprehensive SORA study report...")
@@ -1121,7 +1401,6 @@ class SORAStudy:
             self.log_and_display(f"Error in summarizing key findings: {str(e)}")
             return "Error in summarizing key findings."
 
-
     def suggest_future_research(self):
         self.log_and_display("Suggesting future research directions using LangChain...")
 
@@ -1175,7 +1454,6 @@ class SORAStudy:
         except Exception as e:
             self.log_and_display(f"Error in suggesting future research directions: {str(e)}")
             return "Error in suggesting future research directions."
-
 
     def provide_additional_insights(self):
         self.log_and_display("Generating additional insights using LangChain...")
